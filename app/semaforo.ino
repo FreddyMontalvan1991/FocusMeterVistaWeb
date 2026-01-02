@@ -1,5 +1,6 @@
 #include <LiquidCrystal.h>
 
+
 const int ledVerde1 = A1;
 const int ledVerde2 = A3;
 const int ledVerde3 = A4;
@@ -28,7 +29,6 @@ unsigned long ultimoDatoMillis = 0;
 const unsigned long TIMEOUT_MS = 5000;
 bool datoValido = false;
 
-// ================= FUNCIONES =================
 
 void setLuzVerde(int estado){
   digitalWrite(ledVerde1, estado);
@@ -37,11 +37,13 @@ void setLuzVerde(int estado){
   digitalWrite(ledVerde4, estado);
 }
 
+
 void setLuzAmarilla(int estado){
   digitalWrite(ledAmarillo1, estado);
   digitalWrite(ledAmarillo2, estado);
   digitalWrite(ledAmarillo3, estado);
 }
+
 
 void setLuzRoja(int estado){
   digitalWrite(ledRojo1, estado);
@@ -50,13 +52,13 @@ void setLuzRoja(int estado){
   digitalWrite(ledRojo4, estado);
 }
 
+
 void apagarLeds() {
   setLuzVerde(0);
   setLuzAmarilla(0);
   setLuzRoja(0);
 }
 
-// ================= SETUP =================
 
 void setup() {
   pinMode(ledVerde1, OUTPUT);
@@ -94,7 +96,6 @@ void setup() {
   apagarLeds();
 }
 
-// ================= LOOP =================
 
 void loop() {
   unsigned long ahora = millis();
