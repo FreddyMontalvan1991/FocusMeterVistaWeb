@@ -78,17 +78,18 @@ void setup() {
   lcd.begin(16, 2);
   Serial.begin(115200);
 
-  lcd.clear()
+  setLuzVerde(1);
+  setLuzAmarilla(1);
+  setLuzRoja(1);
+
+  lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("FOCUS METER: ");
   lcd.setCursor(0, 1);
   lcd.print("Sin datos...");
 
-  setLuzVerde(1);
-  setLuzAmarilla(1);
-  setLuzRoja(1);
 
-  delay(5000);
+  delay(3000);
 
   apagarLeds();
 }
@@ -149,7 +150,7 @@ void loop() {
 
   if (datoValido && (ahora - ultimoDatoMillis > TIMEOUT_MS)) {
     apagarLeds();
-    lcd.clear()
+    lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("FOCUS METER: ");
     lcd.setCursor(0, 1);
