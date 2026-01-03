@@ -5,22 +5,27 @@ from ultralytics import YOLO
 import time
 
 # =============================
-# CONFIGURACIÓN Y ESTADO GLOBAL
+# CONFIGURACIÓN
 # =============================
 MODEL_PATH = "app/extras/best.pt"
 
-# Clase para gestionar la cámara en un hilo separado
-class VideoCaptureThread:
+class VideoProcessor:
     def __init__(self, index):
         self.cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
         self.model = YOLO(MODEL_PATH)
         self.frame = None
         self.nivel_atencion = 0
-        self.running = True
-        self.lock = threading.Lock() # Para evitar conflictos de lectura/escritura
+        self.running = False  # Controla si el hilo procesa frames
+        self.lock = threading.Lock()
 
     def start(self):
-        threading.Thread(target=self.update, args=(), daemon=True).start()
+        if not self.running:
+            self.running = True
+            self.thread = threading.Thread(target=self.update, daemon=True)
+            self.thread.start()
+
+    def stop(self):
+        self.running = False
 
     def update(self):
         while self.running:
@@ -28,84 +33,78 @@ class VideoCaptureThread:
             if not ret:
                 break
 
-            # Inferencia YOLO en el hilo
+            # Inferencia YOLO
             results = self.model(frame, conf=0.5, verbose=False)
             annotated_frame = results[0].plot()
 
-            # Cálculo de lógica de atención
+            # Lógica de atención
             atentos = 0
-            boxes = results[0].boxes
-            total = len(boxes)
-            for box in boxes:
+            total = len(results[0].boxes)
+            for box in results[0].boxes:
                 if self.model.names[int(box.cls[0])].lower() in ["atento", "attentive"]:
                     atentos += 1
             
-            # Actualizar variables compartidas de forma segura
             with self.lock:
                 self.frame = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
                 self.nivel_atencion = atentos / total if total > 0 else 0
 
-    def stop(self):
-        self.running = False
-        self.cap.release()
-
 # =============================
-# SINGLETON PARA EL HILO
+# GESTIÓN DE ESTADO (CACHE)
 # =============================
-# Usamos cache_resource para que el hilo no se reinicie al interactuar con la web
 @st.cache_resource
-def get_video_thread():
-    # Probamos índice 2 (USB) o 0 (Integrada)
+def get_processor():
+    # Intentar índices comunes en Ubuntu
     for idx in [2, 0]:
         test_cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
         if test_cap.isOpened():
             test_cap.release()
-            thread = VideoCaptureThread(idx)
-            thread.start()
-            return thread
+            return VideoProcessor(idx)
     return None
 
+processor = get_processor()
+
 # =============================
-# INTERFAZ STREAMLIT (VISTA)
+# INTERFAZ DE USUARIO
 # =============================
-st.set_page_config(page_title="Monitor de Atención", layout="wide")
-st.title("📹 Monitoreo en Tiempo Real (Procesamiento Independiente)")
+st.title("📹 Monitoreo Controlado por Hilos")
 
-video_thread = get_video_thread()
+if "monitoring" not in st.session_state:
+    st.session_state.monitoring = False
 
-if video_thread is None:
-    st.error("❌ No se pudo inicializar ninguna cámara en el servidor.")
-    st.stop()
+col1, col2 = st.columns(2)
 
-# Layout de la vista
-col_vid, col_stats = st.columns([3, 1])
+if col1.button("▶️ Iniciar monitoreo"):
+    st.session_state.monitoring = True
+    processor.start()
 
-with col_vid:
-    image_placeholder = st.empty()
+if col2.button("⏹️ Detener monitoreo"):
+    st.session_state.monitoring = False
+    processor.stop()
 
-with col_stats:
-    st.subheader("Estadísticas")
-    semaforo = st.empty()
-    st.info("El modelo está corriendo permanentemente en el servidor.")
+# Áreas de visualización
+frame_window = st.image([])
+semaforo = st.empty()
 
-# Bucle de la Vista (Streamlit)
-while True:
-    # Leer datos del hilo sin bloquearlo
-    with video_thread.lock:
-        current_frame = video_thread.frame
-        nivel = video_thread.nivel_atencion
+# =============================
+# BUCLE DE VISTA (LOOP PRINCIPAL)
+# =============================
+if st.session_state.monitoring:
+    while st.session_state.monitoring:
+        with processor.lock:
+            img = processor.frame
+            nivel = processor.nivel_atencion
 
-    # Actualizar imagen si hay frame disponible
-    if current_frame is not None:
-        image_placeholder.image(current_frame, channels="RGB", use_container_width=True)
-
-    # Actualizar semáforo
-    if nivel >= 0.7:
-        semaforo.success(f"🟢 ALTA ({nivel:.0%})")
-    elif nivel >= 0.4:
-        semaforo.warning(f"🟡 MEDIA ({nivel:.0%})")
-    else:
-        semaforo.error(f"🔴 BAJA ({nivel:.0%})")
-
-    # Pequeña pausa para no saturar la CPU del navegador
-    time.sleep(0.03)
+        if img is not None:
+            frame_window.image(img, use_container_width=True)
+            
+            # Actualizar Semáforo
+            if nivel >= 0.7:
+                semaforo.success(f"🟢 Nivel de Atención: {nivel:.0%}")
+            elif nivel >= 0.4:
+                semaforo.warning(f"🟡 Nivel de Atención: {nivel:.0%}")
+            else:
+                semaforo.error(f"🔴 Nivel de Atención: {nivel:.0%}")
+        
+        time.sleep(0.01) # Evita sobrecarga de CPU en el navegador
+else:
+    st.info("El sistema está en espera. Presiona 'Iniciar' para ver la cámara.")
