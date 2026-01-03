@@ -3,115 +3,174 @@ import cv2
 import threading
 from ultralytics import YOLO
 import time
+from pymongo import MongoClient
+from datetime import datetime
 
 # =============================
-# PROCESADOR PERSISTENTE (HILO ÚNICO)
+# CONFIGURACIÓN
+# =============================
+MODEL_PATH = "app/extras/best.pt"
+MONGO_URI = "mongodb://localhost:27017/"  # Ajusta tu URI aquí
+DB_NAME = "focusmeter_db"
+COLLECTION_NAME = "atencion_logs"
+
+# =============================
+# PROCESADOR PERSISTENTE
 # =============================
 class BackgroundMonitor:
     def __init__(self, index):
+        # Configuración de Cámara en Ubuntu (V4L2)
         self.cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        # Bajamos resolución para optimizar CPU (Crucial)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 480)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 360)
         
-        self.model = YOLO("app/extras/best.pt")
+        # Carga de Modelo YOLO
+        self.model = YOLO(MODEL_PATH)
+        
+        # Conexión MongoDB
+        try:
+            self.client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=2000)
+            self.db = self.client[DB_NAME]
+            self.collection = self.db[COLLECTION_NAME]
+        except:
+            self.collection = None
+
+        # Variables de estado
         self.frame = None
         self.nivel_atencion = 0
-        self.is_analyzing = True # Siempre analizando
+        self.is_running = True
         self.lock = threading.Lock()
         
-        # Iniciar el hilo inmediatamente al crear el objeto
-        self.thread = threading.Thread(target=self.update, daemon=True)
+        # Hilo de procesamiento
+        self.thread = threading.Thread(target=self.update_loop, daemon=True)
         self.thread.start()
 
-    def update(self):
-        while self.is_analyzing:
+    def update_loop(self):
+        frame_count = 0
+        # OPTIMIZACIÓN: Analizar solo 1 de cada 10 cuadros (aprox. 2-3 veces por segundo)
+        # Esto reduce el uso de CPU en un 80-90%
+        SKIP_FRAMES = 10 
+        
+        # Temporizador para base de datos (guardar cada 10 segundos para no saturar)
+        last_db_save = time.time()
+
+        while self.is_running:
             start_time = time.time()
             ret, frame = self.cap.read()
             if not ret:
-                time.sleep(1) # Reintento si falla la cámara
+                time.sleep(1)
                 continue
 
-            # --- ESTO CORRE SIEMPRE EN EL SERVIDOR ---
-            results = self.model(frame, conf=0.5, verbose=False)
+            frame_count += 1
             
-            # Lógica de atención
-            boxes = results[0].boxes
-            total = len(boxes)
-            atentos = sum(1 for b in boxes if self.model.names[int(b.cls[0])].lower() in ["atento", "attentive"])
-            
-            actual_nivel = atentos / total if total > 0 else 0
+            # --- LÓGICA DE INFERENCIA SELECTIVA ---
+            if frame_count >= SKIP_FRAMES:
+                # Inferencia ligera (imgsz=320 para menos carga en CPU)
+                results = self.model(frame, conf=0.5, verbose=False, imgsz=320)
+                
+                boxes = results[0].boxes
+                total = len(boxes)
+                atentos = sum(1 for b in boxes if self.model.names[int(b.cls[0])].lower() in ["atento", "attentive"])
+                
+                with self.lock:
+                    self.nivel_atencion = atentos / total if total > 0 else 0
+                    # Generamos la imagen con cuadros solo cuando toca analizar
+                    self.frame = cv2.cvtColor(results[0].plot(), cv2.COLOR_BGR2RGB)
+                
+                frame_count = 0
+                
+                # --- GUARDAR EN BASE DE DATOS (Cada 10 seg) ---
+                if time.time() - last_db_save > 10:
+                    self.save_to_mongo()
+                    last_db_save = time.time()
+            else:
+                # Frames intermedios: Solo actualizamos la imagen base (sin YOLO)
+                with self.lock:
+                    self.frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-            # AQUÍ IRÍA TU LÓGICA DE BASE DE DATOS (ej. MongoDB)
-            # self.save_to_db(actual_nivel)
+            # Control de FPS del hilo (aprox 30 FPS de lectura)
+            time_to_sleep = max(0, 0.033 - (time.time() - start_time))
+            time.sleep(time_to_sleep)
 
-            with self.lock:
-                self.nivel_atencion = actual_nivel
-                # Solo procesamos la imagen si es necesario para ahorrar CPU
-                # pero el cálculo del nivel ya se hizo arriba.
-                self.frame = cv2.cvtColor(results[0].plot(), cv2.COLOR_BGR2RGB)
-
-            # Control de FPS para no saturar el servidor (20 FPS)
-            time.sleep(max(0, 0.05 - (time.time() - start_time)))
+    def save_to_mongo(self):
+        if self.collection is not None:
+            data = {
+                "timestamp": datetime.now(),
+                "nivel_atencion": self.nivel_atencion
+            }
+            try:
+                self.collection.insert_one(data)
+            except:
+                pass # Evita que el programa caiga si falla la BD
 
 # =============================
-# INICIALIZACIÓN (SOLO UNA VEZ)
+# INICIALIZACIÓN SINGLETON
 # =============================
 @st.cache_resource
-def start_persistent_monitor():
-    # Intentar índices 2 y 0
-    for idx in [2, 0]:
-        cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
-        if cap.isOpened():
-            cap.release()
+def get_persistent_monitor():
+    # Probamos índices de cámara comunes en Ubuntu
+    for idx in [2, 0, 1]:
+        test_cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+        if test_cap.isOpened():
+            test_cap.release()
             return BackgroundMonitor(idx)
     return None
 
-# El monitor se inicia en cuanto arranca Streamlit, sin esperar botones
-monitor = start_persistent_monitor()
-
 # =============================
-# INTERFAZ DE VISTA (STREAMLIT)
+# INTERFAZ STREAMLIT
 # =============================
-st.title("📹 Sistema de Monitoreo Persistente")
+st.set_page_config(page_title="FocusMeter PFC", layout="wide")
+st.title("📹 Monitoreo Estudiantil Persistente")
 
-if "show_view" not in st.session_state:
-    st.session_state.show_view = False
+monitor = get_persistent_monitor()
 
+if monitor is None:
+    st.error("❌ No se detectó cámara en /dev/video0 o /dev/video2")
+    st.stop()
+
+# Manejo de estado de la vista
+if "view_active" not in st.session_state:
+    st.session_state.view_active = False
+
+# Sidebar de información constante
+st.sidebar.header("⚙️ Estado del Sistema")
+st.sidebar.success("Servidor: Activo")
+st.sidebar.info("Análisis en 2do plano: CORRIENDO")
+
+# Botones de control de vista
 col1, col2 = st.columns(2)
+if col1.button("▶️ Ver Cámara"):
+    st.session_state.view_active = True
+if col2.button("⏹️ Ocultar Cámara"):
+    st.session_state.view_active = False
 
-# Los botones ahora solo controlan la VISTA, no el PROCESAMIENTO
-if col1.button("👁️ Ver Monitoreo"):
-    st.session_state.show_view = True
+# Contenedores visuales
+frame_placeholder = st.empty()
+metric_placeholder = st.empty()
 
-if col2.button("🚫 Ocultar Vista"):
-    st.session_state.show_view = False
-
-# Espacios para la interfaz
-frame_window = st.image([])
-semaforo = st.empty()
-info_status = st.sidebar.empty()
-
-# Mostrar estado permanente en la barra lateral
-with info_status.container():
-    st.write("🛰️ **Estado del Servidor:** Ejecutando análisis")
-    with monitor.lock:
-        st.metric("Nivel Actual", f"{monitor.nivel_atencion:.0%}")
-
-# --- LÓGICA DE VISUALIZACIÓN ---
-if st.session_state.show_view:
-    while st.session_state.show_view:
+# --- BUCLE DE VISUALIZACIÓN ---
+if st.session_state.view_active:
+    # Este bucle solo corre si el usuario quiere ver la cámara
+    while st.session_state.view_active:
         with monitor.lock:
             img = monitor.frame
             nivel = monitor.nivel_atencion
 
         if img is not None:
-            frame_window.image(img, use_container_width=True)
+            frame_placeholder.image(img, use_container_width=True)
             
-            if nivel >= 0.7: semaforo.success(f"🟢 Atención Alta: {nivel:.0%}")
-            elif nivel >= 0.4: semaforo.warning(f"🟡 Atención Media: {nivel:.0%}")
-            else: semaforo.error(f"🔴 Atención Baja: {nivel:.0%}")
+            # Actualizar Semáforo/Métrica
+            if nivel >= 0.7:
+                metric_placeholder.success(f"🟢 Nivel de Atención: {nivel:.0%}")
+            elif nivel >= 0.4:
+                metric_placeholder.warning(f"🟡 Nivel de Atención: {nivel:.0%}")
+            else:
+                metric_placeholder.error(f"🔴 Nivel de Atención: {nivel:.0%}")
         
-        time.sleep(0.05) # Freno para la interfaz web
+        time.sleep(0.05) # Actualización web a 20 FPS
 else:
-    frame_window.empty()
-    semaforo.info("Análisis en segundo plano activo. Presiona 'Ver Monitoreo' para visualizar.")
+    frame_placeholder.info("📺 La vista está desactivada, pero el servidor sigue analizando y guardando datos en MongoDB.")
+    # Mostrar métrica estática aunque la cámara no se vea
+    with monitor.lock:
+        st.metric("Último Nivel Registrado", f"{monitor.nivel_atencion:.0%}")
