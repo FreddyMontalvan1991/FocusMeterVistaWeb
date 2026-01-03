@@ -4,6 +4,7 @@ streamlit==1.52.2
 # Modelo
 opencv-python-headless==4.12.0.88
 ultralytics==8.3.240
+fastapi==0.126.0
 
 # BD
 pymongo==4.15.5
