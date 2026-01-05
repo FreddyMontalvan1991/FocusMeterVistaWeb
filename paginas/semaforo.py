@@ -14,7 +14,7 @@ comunicacion_serial = None
 
 MODEL_PATH = "modelo/best.pt"
 
-RTSP_URL = "rtsp://admin:Novat3ch@192.168.1.5:554/Streaming/Channels/101"
+RTSP_URL = "rtsp://admin:Novat3ch@192.168.137.35:554/Streaming/Channels/101"
 CAMERA_INDEX = 0
 
 
